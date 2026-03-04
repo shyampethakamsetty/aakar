@@ -1,0 +1,359 @@
+We’ll design this as a **compliance-first, enterprise-grade, analytics-ready PostgreSQL schema**.
+
+This will support:
+
+* Strong normalization
+* Historical tracking (EIC, contacts, values, extensions)
+* Document versioning
+* Dashboard aggregation queries
+* Expiry reminders
+* Organization-wise EMD reporting
+* Future BI integration
+
+---
+
+# 🏗 ENTERPRISE ARCHITECTURE DESIGN
+
+We’ll design in layers:
+
+1. Master Tables
+2. Core Project Table
+3. Commercial & Financial Layer
+4. Compliance & HR Layer
+5. Schedule & Extensions
+6. Contacts & EIC History
+7. Subcontractors
+8. Documents (centralized system)
+9. Timeline & Progress
+10. Indexes for reporting
+
+---
+
+# 🔵 1. ENUM TYPES (Strict Enterprise Control)
+
+```sql
+CREATE TYPE project_status_enum AS ENUM (
+    'ONGOING',
+    'COMPLETED',
+    'PAYMENT_PENDING',
+    'ON_HOLD',
+    'CANCELLED'
+);
+
+CREATE TYPE organization_type_enum AS ENUM (
+    'NTPC',
+    'PGCIL',
+    'OTHER'
+);
+
+CREATE TYPE emd_type_enum AS ENUM (
+    'ONLINE',
+    'EXEMPTED_MSME'
+);
+
+CREATE TYPE document_category_enum AS ENUM (
+    'CLIENT',
+    'SUBCONTRACTOR',
+    'FINANCIAL',
+    'COMPLIANCE',
+    'HR',
+    'OTHER'
+);
+```
+
+---
+
+# 🔵 2. MASTER TABLES
+
+## Employees (EIC Reference)
+
+```sql
+CREATE TABLE employees (
+    id SERIAL PRIMARY KEY,
+    full_name VARCHAR(150) NOT NULL,
+    initials VARCHAR(10),
+    designation VARCHAR(100),
+    mobile VARCHAR(20),
+    email VARCHAR(150),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+## Clients
+
+```sql
+CREATE TABLE clients (
+    id SERIAL PRIMARY KEY,
+    company_name VARCHAR(255) NOT NULL,
+    organization_type organization_type_enum NOT NULL,
+    address TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 🔵 3. CORE PROJECT TABLE
+
+```sql
+CREATE TABLE projects (
+    id SERIAL PRIMARY KEY,
+    jan_number INTEGER UNIQUE NOT NULL,  -- Numeric only as client required
+    client_id INTEGER REFERENCES clients(id),
+    
+    work_name TEXT NOT NULL,
+    location VARCHAR(255),
+    tender_reference VARCHAR(255),
+    financial_year VARCHAR(20),
+
+    status project_status_enum NOT NULL DEFAULT 'ONGOING',
+
+    previous_eic_id INTEGER REFERENCES employees(id),
+    current_eic_id INTEGER REFERENCES employees(id),
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 🔵 4. CLIENT CONTACT HISTORY (Enterprise Versioned)
+
+```sql
+CREATE TABLE client_contacts (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    
+    name VARCHAR(150),
+    designation VARCHAR(150),
+    mobile VARCHAR(20),
+    email VARCHAR(150),
+    
+    is_current BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 🔵 5. COMMERCIAL DETAILS
+
+```sql
+CREATE TABLE project_commercials (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+
+    original_contract_value NUMERIC(15,2),
+    updated_contract_value NUMERIC(15,2),
+    po_value_initial NUMERIC(15,2),
+    po_value_final NUMERIC(15,2),
+    executed_final_amount NUMERIC(15,2),
+
+    gst_status VARCHAR(100),
+
+    bg_status VARCHAR(100),
+    bg_value NUMERIC(15,2),
+    bank_name VARCHAR(150),
+    bg_expiry_date DATE,
+    bg_claim_date DATE,
+
+    loa_number VARCHAR(255),
+    loa_date DATE,
+    po_date DATE,
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 🔵 6. SCHEDULE & EXTENSIONS
+
+```sql
+CREATE TABLE project_schedule (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+
+    loa_received_date DATE,
+    work_start_date_po DATE,
+    actual_work_start_date DATE,
+    completion_original DATE,
+    completion_latest DATE,
+    completion_extended DATE
+);
+```
+
+---
+
+## Time Extensions (for Reminder Dashboard)
+
+```sql
+CREATE TABLE project_extensions (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+
+    extension_from DATE,
+    extension_to DATE,
+    approval_date DATE,
+    reminder_frequency_months INTEGER DEFAULT 1,
+    reminder_enabled BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 🔵 7. COMPLIANCE & HR SECTION
+
+```sql
+CREATE TABLE project_compliance (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+
+    emd_type emd_type_enum,
+    emd_amount NUMERIC(15,2),
+
+    tender_fee NUMERIC(12,2),
+
+    policy_expiry_date DATE,
+
+    labour_license_no VARCHAR(100),
+    labour_registration_date DATE,
+    labour_expiry_date DATE,
+    bocw_applicable BOOLEAN DEFAULT FALSE,
+
+    cm_email VARCHAR(150),
+    cm_mobile VARCHAR(20),
+    po_issued_person VARCHAR(150)
+);
+```
+
+---
+
+# 🔵 8. SUBCONTRACTORS
+
+```sql
+CREATE TABLE project_subcontractors (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+
+    company_name VARCHAR(255),
+    proprietor VARCHAR(150),
+    mobile VARCHAR(20),
+    email VARCHAR(150),
+    gstin VARCHAR(20),
+
+    wo_percentage NUMERIC(5,2),
+    wo_number VARCHAR(100),
+    wo_date DATE,
+
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 🔵 9. CENTRALIZED DOCUMENT MANAGEMENT
+
+This is critical for scalability.
+
+```sql
+CREATE TABLE project_documents (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+
+    category document_category_enum,
+    document_type VARCHAR(150),
+
+    file_url TEXT NOT NULL,
+    document_number VARCHAR(150),
+    document_date DATE,
+
+    description TEXT,
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 🔵 10. PROJECT PROGRESS & TIMELINE
+
+```sql
+CREATE TABLE project_progress (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+    progress_percentage NUMERIC(5,2) DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+```sql
+CREATE TABLE project_timeline (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+
+    milestone_date DATE,
+    title VARCHAR(255),
+    description TEXT,
+    status VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 📊 Dashboard Aggregation Ready
+
+Now we can easily query:
+
+## 1️⃣ Time Extension Due (Monthly)
+
+```sql
+SELECT p.jan_number, pe.extension_to
+FROM project_extensions pe
+JOIN projects p ON p.id = pe.project_id
+WHERE pe.extension_to <= CURRENT_DATE + INTERVAL '30 days'
+AND pe.reminder_enabled = TRUE;
+```
+
+---
+
+## 2️⃣ Total EMD Submitted Organization-wise
+
+```sql
+SELECT c.organization_type,
+       SUM(pc.emd_amount) AS total_emd
+FROM project_compliance pc
+JOIN projects p ON p.id = pc.project_id
+JOIN clients c ON c.id = p.client_id
+GROUP BY c.organization_type;
+```
+
+---
+
+# 📈 Why This Is Enterprise Grade
+
+✔ No duplicated data
+✔ Fully normalized
+✔ Historical tracking possible
+✔ Ready for BI tools
+✔ Supports 10,000+ projects
+✔ Clean separation of concerns
+✔ Scalable document system
+✔ Reminder engine ready
+✔ Future API friendly
+
+---
+
+# 🚀 What Frontend Can Now Do Easily
+
+* Fetch full project dashboard via joins
+* Build organization summary cards
+* Build expiring license alerts
+* Build EMD aggregation charts
+* Build compliance dashboards
+* Build HR clearance tracker
